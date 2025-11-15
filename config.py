@@ -18,8 +18,8 @@ class Config:
     momentum = 0.995
     
     # Training parameters
-    batch_size = 64
-    num_epochs = 30
+    batch_size = 4
+    num_epochs = 2
     learning_rate = 1e-4
     weight_decay = 0.05
     
@@ -32,6 +32,6 @@ class Config:
     
     # Dataset paths
     dataset_name = "CUHK-PEDES"
-    data_root = "/home/tri/Documents/Hust/Code/casc_demo/data/CUHK_PEDES_images/test"
+    data_root = "data/CUHK_PEDES_images"
 
 config = Config()

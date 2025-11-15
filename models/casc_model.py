@@ -9,7 +9,7 @@ from utils.ccl import ConditionalContrastiveLearning
 class CASCModel(nn.Module):
     '''
     CASC: Cross-modal Alignment with Synthetic Caption
-    Main model for Text-based Person Search
+    Fixed version with proper attention handling
     '''
     def __init__(self, config):
         super().__init__()
@@ -36,7 +36,7 @@ class CASCModel(nn.Module):
         
         # Cross encoder for ITM
         self.cross_encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=768, nhead=12),
+            nn.TransformerEncoderLayer(d_model=768, nhead=12, batch_first=True),
             num_layers=6
         )
         self.itm_head = nn.Linear(768, 2)
@@ -97,7 +97,8 @@ class CASCModel(nn.Module):
         t_proj = txt_out['projection']
         
         # Apply GAS to select discriminative features
-        mask, v_masked = self.gas(attentions, v_local)
+        # Pass cls token as fallback when attention is None
+        mask, v_masked = self.gas(attentions, v_local, cls_token=v_cls)
         
         # Generate caption with masked image features
         loss_lm, caption_feat = self.caption_decoder(
@@ -105,7 +106,14 @@ class CASCModel(nn.Module):
         )
         
         # Get caption projection
-        c_proj = caption_feat[:, 0]  # Use first token as caption feature
+        c_proj = self.caption_decoder.lm_model.bert.embeddings.word_embeddings.weight.mean(0)
+        c_proj = caption_feat[:, 0] if caption_feat.dim() > 1 else caption_feat
+        
+        # Project to same dimension as image/text features
+        if c_proj.shape[-1] != v_proj.shape[-1]:
+            if not hasattr(self, 'caption_projection'):
+                self.caption_projection = nn.Linear(c_proj.shape[-1], v_proj.shape[-1]).to(c_proj.device)
+            c_proj = self.caption_projection(c_proj)
         
         # Conditional Contrastive Learning
         ccl_losses = self.ccl(v_proj, t_proj, c_proj)
@@ -113,14 +121,13 @@ class CASCModel(nn.Module):
         # Image-Text Matching (simplified)
         # Concatenate image and text features
         combined = torch.cat([v_cls.unsqueeze(1), t_seq], dim=1)
-        cross_out = self.cross_encoder(combined.transpose(0, 1))
-        itm_logits = self.itm_head(cross_out[0])
+        cross_out = self.cross_encoder(combined)
+        itm_logits = self.itm_head(cross_out[:, 0])
         
-        # Create ITM labels (1 for positive pairs, 0 for negatives)
+        # Create ITM labels (1 for positive pairs)
         batch_size = images.size(0)
-        itm_labels = torch.arange(batch_size).to(images.device)
-        itm_labels = (itm_labels == itm_labels.view(-1, 1)).long()
-        loss_itm = nn.CrossEntropyLoss()(itm_logits, itm_labels[:, 0])
+        itm_labels = torch.ones(batch_size, dtype=torch.long).to(images.device)
+        loss_itm = nn.CrossEntropyLoss()(itm_logits, itm_labels)
         
         # Total loss
         total_loss = (

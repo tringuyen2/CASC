@@ -1,3 +1,6 @@
+"""
+Updated Training script for CASC with custom image-text pair dataset
+"""
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -8,13 +11,12 @@ import os
 import sys
 import logging
 from datetime import datetime
+import argparse
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import config
-from models.casc_model import CASCModel
-from data.dataset import PersonSearchDataset, collate_fn
 
 
 def setup_logging(log_dir='logs'):
@@ -36,6 +38,54 @@ def setup_logging(log_dir='logs'):
     return logging.getLogger(__name__)
 
 
+def load_dataset(data_root, split, batch_size):
+    """Load dataset - try custom format first, then fallback to original"""
+    
+    # Try custom image-text pair dataset first
+    try:
+        from data.custom_dataset import ImageTextPairDataset, collate_fn
+        
+        dataset = ImageTextPairDataset(
+            data_root=data_root,
+            split=split,
+            image_size=config.image_size
+        )
+        
+        print(f"✓ Using custom image-text pair dataset")
+        
+    except Exception as e:
+        print(f"Custom dataset failed: {e}")
+        print(f"Trying original dataset format...")
+        
+        try:
+            from data.dataset import PersonSearchDataset, collate_fn
+            
+            dataset = PersonSearchDataset(
+                data_root=data_root,
+                split=split,
+                image_size=config.image_size
+            )
+            
+            print(f"✓ Using original dataset format")
+            
+        except Exception as e2:
+            print(f"Original dataset also failed: {e2}")
+            raise ValueError("Could not load dataset with any format!")
+    
+    # Create dataloader
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=(split == 'train'),
+        num_workers=4,
+        pin_memory=True,
+        collate_fn=collate_fn,
+        drop_last=(split == 'train')
+    )
+    
+    return dataset, dataloader
+
+
 def train_one_epoch(model, dataloader, optimizer, device, epoch, logger):
     """Train for one epoch"""
     model.train()
@@ -55,6 +105,11 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger):
             # Forward pass
             outputs = model(images, text_ids, attention_mask, labels)
             loss = outputs['total_loss']
+            
+            # Check for NaN
+            if torch.isnan(loss):
+                logger.warning(f"NaN loss detected at batch {batch_idx}, skipping...")
+                continue
             
             # Backward pass
             optimizer.zero_grad()
@@ -80,22 +135,25 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger):
             
         except Exception as e:
             logger.error(f"Error in batch {batch_idx}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
     
     # Calculate averages
     num_batches = len(dataloader)
-    avg_loss = total_loss / num_batches
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0
     for key in loss_dict.keys():
-        loss_dict[key] /= num_batches
+        loss_dict[key] = loss_dict[key] / num_batches if num_batches > 0 else 0
     
     return avg_loss, loss_dict
 
 
 @torch.no_grad()
-def validate(model, dataloader, device):
+def validate(model, dataloader, device, logger):
     """Validation function"""
     model.eval()
     total_loss = 0
+    num_batches = 0
     
     for batch in tqdm(dataloader, desc='Validating'):
         try:
@@ -106,12 +164,13 @@ def validate(model, dataloader, device):
             
             outputs = model(images, text_ids, attention_mask, labels)
             total_loss += outputs['total_loss'].item()
+            num_batches += 1
             
         except Exception as e:
-            print(f"Validation error: {e}")
+            logger.error(f"Validation error: {e}")
             continue
     
-    return total_loss / len(dataloader)
+    return total_loss / num_batches if num_batches > 0 else 0
 
 
 def save_checkpoint(model, optimizer, epoch, loss, path):
@@ -129,54 +188,91 @@ def save_checkpoint(model, optimizer, epoch, loss, path):
     print(f"✓ Saved checkpoint: {path}")
 
 
-def main():
+def main(args):
     """Main training function"""
     # Setup logging
     logger = setup_logging()
+    logger.info("="*60)
     logger.info("Starting CASC training...")
+    logger.info("="*60)
     
     # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f"Using device: {device}")
+    if torch.cuda.is_available():
+        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
     
     # Create model
-    logger.info("Creating model...")
+    logger.info("\nCreating model...")
     try:
+        from models.casc_model import CASCModel
+        
         model = CASCModel(config).to(device)
         num_params = sum(p.numel() for p in model.parameters())
-        logger.info(f"Model created with {num_params:,} parameters")
+        logger.info(f"✓ Model created with {num_params:,} parameters")
+        
     except Exception as e:
         logger.error(f"Error creating model: {e}")
-        logger.info("Trying to download pretrained models...")
-        # This will trigger download of required models
-        from transformers import CLIPVisionModel, BertModel
+        logger.info("Downloading pretrained models...")
+        
+        # Download required models
+        from transformers import CLIPVisionModel, BertModel, BertTokenizer
+        
+        logger.info("Downloading CLIP...")
         CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch16")
+        
+        logger.info("Downloading BERT...")
         BertModel.from_pretrained('bert-base-uncased')
+        BertTokenizer.from_pretrained('bert-base-uncased')
+        
+        # Try again
+        from models.casc_model import CASCModel
         model = CASCModel(config).to(device)
+        num_params = sum(p.numel() for p in model.parameters())
+        logger.info(f"✓ Model created with {num_params:,} parameters")
+    
+    # Load checkpoint if resuming
+    start_epoch = 1
+    if args.resume:
+        if os.path.exists(args.resume):
+            logger.info(f"Loading checkpoint from {args.resume}")
+            checkpoint = torch.load(args.resume, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            logger.info(f"✓ Resumed from epoch {checkpoint['epoch']}")
+        else:
+            logger.warning(f"Checkpoint {args.resume} not found, starting from scratch")
     
     # Create dataset and dataloader
-    logger.info(f"Loading dataset from {config.data_root}...")
+    logger.info(f"\nLoading dataset from {config.data_root}...")
     try:
-        train_dataset = PersonSearchDataset(
+        train_dataset, train_loader = load_dataset(
             data_root=config.data_root,
             split='train',
-            image_size=config.image_size
+            batch_size=config.batch_size
         )
         
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=config.batch_size,
-            shuffle=True,
-            num_workers=4,
-            pin_memory=True,
-            collate_fn=collate_fn,
-            drop_last=True
-        )
+        logger.info(f"✓ Training dataset size: {len(train_dataset)}")
+        logger.info(f"✓ Number of batches: {len(train_loader)}")
         
-        logger.info(f"Training dataset size: {len(train_dataset)}")
+        # Try to load validation set
+        try:
+            val_dataset, val_loader = load_dataset(
+                data_root=config.data_root,
+                split='val',
+                batch_size=config.batch_size
+            )
+            logger.info(f"✓ Validation dataset size: {len(val_dataset)}")
+            has_val = True
+        except:
+            logger.warning("No validation set found, skipping validation")
+            has_val = False
         
     except Exception as e:
         logger.error(f"Error loading dataset: {e}")
+        import traceback
+        traceback.print_exc()
         return
     
     # Optimizer and scheduler
@@ -194,9 +290,11 @@ def main():
     
     # Training loop
     best_loss = float('inf')
+    logger.info("\n" + "="*60)
     logger.info("Starting training loop...")
+    logger.info("="*60)
     
-    for epoch in range(1, config.num_epochs + 1):
+    for epoch in range(start_epoch, config.num_epochs + 1):
         logger.info(f"\n{'='*60}")
         logger.info(f"Epoch {epoch}/{config.num_epochs}")
         logger.info(f"{'='*60}")
@@ -207,13 +305,18 @@ def main():
         )
         
         # Log results
-        logger.info(f"Epoch {epoch} Results:")
+        logger.info(f"\nEpoch {epoch} Training Results:")
         logger.info(f"  Average Loss: {avg_loss:.4f}")
         logger.info(f"  ITC Loss: {loss_dict['itc']:.4f}")
         logger.info(f"  ICC Loss: {loss_dict['icc']:.4f}")
         logger.info(f"  TCC Loss: {loss_dict['tcc']:.4f}")
         logger.info(f"  ITM Loss: {loss_dict['itm']:.4f}")
         logger.info(f"  LM Loss: {loss_dict['lm']:.4f}")
+        
+        # Validation
+        if has_val and epoch % args.val_freq == 0:
+            val_loss = validate(model, val_loader, device, logger)
+            logger.info(f"  Validation Loss: {val_loss:.4f}")
         
         # Update learning rate
         scheduler.step()
@@ -229,11 +332,17 @@ def main():
             logger.info(f"  ✓ New best model saved! Loss: {avg_loss:.4f}")
         
         # Save regular checkpoint
-        if epoch % 5 == 0:
+        if epoch % args.save_freq == 0:
             save_checkpoint(
                 model, optimizer, epoch, avg_loss,
                 f'checkpoints/checkpoint_epoch_{epoch}.pth'
             )
+        
+        # Save latest checkpoint
+        save_checkpoint(
+            model, optimizer, epoch, avg_loss,
+            'checkpoints/latest.pth'
+        )
     
     logger.info("\n" + "="*60)
     logger.info("Training completed!")
@@ -242,6 +351,14 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
-
+    parser = argparse.ArgumentParser(description='Train CASC model')
+    parser.add_argument('--resume', type=str, default=None,
+                      help='Path to checkpoint to resume from')
+    parser.add_argument('--save-freq', type=int, default=5,
+                      help='Save checkpoint every N epochs')
+    parser.add_argument('--val-freq', type=int, default=1,
+                      help='Run validation every N epochs')
     
+    args = parser.parse_args()
+    
+    main(args)
