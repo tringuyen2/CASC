@@ -26,5 +26,4 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-data/CUHK_PEDES_images/train/
 checkpoints/
