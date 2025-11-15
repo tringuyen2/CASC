@@ -19,7 +19,7 @@ class Config:
     
     # Training parameters
     batch_size = 4
-    num_epochs = 2
+    num_epochs = 30
     learning_rate = 1e-4
     weight_decay = 0.05
     
