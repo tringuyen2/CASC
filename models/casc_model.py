@@ -40,6 +40,7 @@ class CASCModel(nn.Module):
             num_layers=6
         )
         self.itm_head = nn.Linear(768, 2)
+        self.caption_projection = nn.Linear(768, 256)
         
     def _init_momentum_models(self):
         '''Initialize momentum models'''

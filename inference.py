@@ -1,3 +1,5 @@
+import os
+import glob
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -29,7 +31,6 @@ class PersonSearchInference:
     
     @torch.no_grad()
     def encode_images(self, image_paths):
-        '''Encode a list of images'''
         image_features = []
         
         for img_path in tqdm(image_paths, desc='Encoding images'):
@@ -43,13 +44,10 @@ class PersonSearchInference:
     
     @torch.no_grad()
     def encode_text(self, text_query):
-        '''Encode a text query'''
-        # Tokenize text
         encoded = self.model.text_encoder.tokenize([text_query])
         text_ids = encoded['input_ids'].to(self.device)
         attention_mask = encoded['attention_mask'].to(self.device)
         
-        # Extract features
         feat = self.model.extract_features(
             text_ids=text_ids,
             attention_mask=attention_mask
@@ -58,42 +56,48 @@ class PersonSearchInference:
         return feat.cpu()
     
     def search(self, text_query, image_features, top_k=10):
-        '''Search for images matching the text query'''
-        # Encode query
         text_feat = self.encode_text(text_query)
         
-        # Compute similarities
         text_feat = F.normalize(text_feat, dim=-1)
         image_features = F.normalize(image_features, dim=-1)
         
         similarities = torch.matmul(text_feat, image_features.t()).squeeze(0)
         
-        # Get top-k results
         top_k_values, top_k_indices = torch.topk(similarities, min(top_k, len(similarities)))
         
         return top_k_indices.tolist(), top_k_values.tolist()
 
+def load_gallery_images(folder):
+    """Load all images (.jpg, .jpeg, .png) from a folder"""
+    exts = ["*.jpg", "*.jpeg", "*.png"]
+    files = []
+    for ext in exts:
+        files.extend(glob.glob(os.path.join(folder, ext)))
+    return sorted(files)
+
 def main():
-    # Example usage
-    inference = PersonSearchInference('checkpoints/best_model.pth')
+    inference = PersonSearchInference('checkpoints/checkpoint_epoch_10.pth')
     
-    # Example: Search in a gallery
-    gallery_paths = [
-        'path/to/image1.jpg',
-        'path/to/image2.jpg',
-        # ... more images
-    ]
+    # === NEW: load all images automatically ===
+    gallery_folder = "data/CUHK_PEDES_images/test"
+    gallery_paths = load_gallery_images(gallery_folder)
+
+    if not gallery_paths:
+        print("No images found in folder:", gallery_folder)
+        return
     
-    print('Encoding gallery images...')
+    print(f'Found {len(gallery_paths)} images in gallery.')
+
+    print('\nEncoding gallery images...')
     image_features = inference.encode_images(gallery_paths)
     
-    # Search with text query
-    query = "A person wearing a red jacket and blue jeans"
-    print(f'\\nSearching for: {query}')
+    # query = "A person wearing a red jacket and blue jeans"
+    query = "This man is wearing a bright red hoody and blue jeans while walking down a busy city street"
+    print(f'\nSearching for: {query}')
     
     indices, scores = inference.search(query, image_features, top_k=5)
     
-    print('\\nTop 5 results:')
+    print('\nTop 5 results:')
     for i, (idx, score) in enumerate(zip(indices, scores)):
         print(f'{i+1}. Image: {gallery_paths[idx]}, Score: {score:.4f}')
 
