@@ -76,7 +76,7 @@ def load_gallery_images(folder):
     return sorted(files)
 
 def main():
-    inference = PersonSearchInference('checkpoints/checkpoint_epoch_10.pth')
+    inference = PersonSearchInference('checkpoints/best_model.pth')
     
     # === NEW: load all images automatically ===
     gallery_folder = "data/CUHK_PEDES_images/test"
