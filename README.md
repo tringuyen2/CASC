@@ -37,6 +37,11 @@ python train.py
 python inference.py
 ```
 
+### Google Colab Training
+https://colab.research.google.com/drive/138QP7BYapERNK3xhdnBTok4IvYgZxAsT?usp=sharing
+
+### Link model: https://drive.google.com/file/d/1iTSro0LA-LByAm0I8rSwxTX8EOO__W6L/view?usp=sharing
+
 ## Model Architecture
 
 ```
